@@ -10,7 +10,7 @@
 
 ---
 
-# ** Visão Geral dos Módulos**
+# **Visão Geral dos Módulos**
 
 1. **Bluetooth base + descoberta + ligações**
 2. **Controlo de rede + interface CLI**
@@ -270,20 +270,4 @@ Unificar tudo, testar, corrigir e preparar entrega.
   * `/sync`
   * `/common`
   * `/support`
-
 ---
-
-# **Resumo visual (Gantt simplificado)**
-
-```
-Semana:             1   2   3   4   5   6   7   8
--------------------------------------------------
-BLE básico          ████
-Controlo rede           ███
-Certificados               ███
-Sessões + MAC                 ███
-Routing + tables                 ███
-Heartbeat + falhas                 █████
-DTLS + Inbox                            ███
-Integração + README                        ███
-```
