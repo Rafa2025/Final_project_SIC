@@ -59,7 +59,6 @@ class NodeRouter:
         """
         self.bt.start(self.on_bt_data)
         # Start listening for incoming RFCOMM connections
-        self.bt.start_server()
         print(f"[NODE {self.my_nid}] Router started")
 
     def stop(self) -> None:
@@ -290,3 +289,43 @@ class NodeRouter:
         self.hop_count = 255
         self.routing = RoutingTable()
         print(f"[NODE {self.my_nid}] Uplink down, routing table cleared")
+
+    # --------------------------------------------------------------
+    # Connect to chosen device (called by UI)
+    # --------------------------------------------------------------
+    def connect_to_device(self, dev) -> None:
+        """
+        Connect to the device selected in the UI.
+        dev is a DeviceInfo object from scan_nearby().
+        """
+
+        # OPTIONAL: Filter non-mesh devices
+        if "MESH" not in dev.name and "|" not in dev.name:
+            print(f"[NODE {self.my_nid}] WARNING: '{dev.name}' is not a mesh device.")
+            print("Connection may fail.")
+        
+        try:
+            link_id = self.bt.connect_to(dev.address)
+        except Exception as e:
+            print(f"[NODE {self.my_nid}] Connection failed: {e}")
+            return
+
+        # Save link state
+        hop_from_neighbor = dev.hop_count if dev.hop_count < 255 else 10
+        self.links[link_id] = LinkState(
+            is_uplink=(self.uplink_link_id is None), 
+            peer_hop_count=hop_from_neighbor
+        )
+
+        # Treat as uplink if none exists yet
+        if self.uplink_link_id is None:
+            self.uplink_link_id = link_id
+            self.hop_count = hop_from_neighbor + 1
+            print(f"[NODE {self.my_nid}] Using link {link_id} as uplink (hop={self.hop_count})")
+
+        # TODO: run mutual auth, derive link key
+        dummy_key = b"\x02" * 32
+        self.sec.set_link_key(link_id, dummy_key)
+
+        print(f"[NODE {self.my_nid}] Connected on link {link_id}")
+

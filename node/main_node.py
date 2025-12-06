@@ -53,7 +53,7 @@ def main() -> None:
         print("       Make sure you ran the CA and device cert generation scripts.")
         sys.exit(1)
 
-    bt = BluetoothManager()
+    bt = BluetoothManager(enable_server=False)
     router = NodeRouter(my_nid=my_nid, bt=bt, sec=sec, sink_cert_pem=sink_cert_pem)
     router.start()
 

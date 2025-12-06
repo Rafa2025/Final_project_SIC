@@ -25,7 +25,7 @@ def load_sink_certs() -> SecurityContext:
 def main() -> None:
     sink_nid = NID(bytes(16))  # reserved ID for sink
 
-    bt = BluetoothManager()
+    bt = BluetoothManager(enable_server=True)
     sec = load_sink_certs()
     inbox = InboxService()
 
@@ -45,7 +45,6 @@ def main() -> None:
     finally:
         hb.stop()
         router.stop()
-
 
 if __name__ == "__main__":
     main()

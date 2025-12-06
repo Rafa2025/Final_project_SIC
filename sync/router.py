@@ -42,9 +42,8 @@ class SinkRouter:
     links: Dict[LinkId, NID] = field(default_factory=dict)  # link_id -> neighbor nid
 
     def start(self) -> None:
-        # Start Bluetooth + listener
+    # BluetoothManager(enable_server=True) already starts server
         self.bt.start(self.on_bt_data)
-        self.bt.start_server()
         print("[SINK] Router started")
 
     def stop(self) -> None:
