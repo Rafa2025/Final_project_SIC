@@ -1,159 +1,248 @@
 # node/router.py
+
 from __future__ import annotations
+
 from dataclasses import dataclass, field
-from typing import Dict, Optional, List
-from time import monotonic
+from typing import List, Optional
+import time
 
 from common.nid import NID
-from common.bluetooth import BluetoothManager
-from common.routing import RoutingTable, LinkId
-from common.message import WireMessage, MessageHeader, ServiceId, encode_message
+from common.bluetooth import BluetoothManager, DeviceInfo
+from common.routing import RoutingTable
+from common.message import (
+    WireMessage,
+    MessageHeader,
+    ServiceId,
+    encode_message,
+    decode_message,
+    split_packet,
+)
 from common.security import SecurityContext
 
-SINK_NID = NID(bytes(16))  # all zeros, configurable
 
-@dataclass
-class LinkState:
-    is_uplink: bool
-    peer_nid: Optional[NID] = None
-    peer_hop_count: int = 255
+# By convention, we use all-zero NID for the Sink
+SINK_NID = NID(b"\x00" * 16)
+
 
 @dataclass
 class NodeRouter:
+    """
+    Node-side router:
+      - Handles Bluetooth links (via BluetoothManager)
+      - Verifies MACs
+      - Routes messages to/from neighbors
+      - Sends messages to Sink
+      - Tracks heartbeats to detect uplink loss
+    """
+
     my_nid: NID
     bt: BluetoothManager
     sec: SecurityContext
+    sink_cert_pem: bytes
 
     routing: RoutingTable = field(default_factory=RoutingTable)
-    links: Dict[LinkId, LinkState] = field(default_factory=dict)
-    uplink_link_id: Optional[LinkId] = None
-    hop_count: int = 255  # 255 = no uplink
-    lost_heartbeats: int = 0
+
+    uplink_link_id: Optional[int] = None
+    hop_count: int = 255  # 255 = unknown / disconnected
+
     routed_count: int = 0
-    last_heartbeat_ts: float = field(default_factory=lambda: monotonic())
+    lost_heartbeats: int = 0
+    last_heartbeat_ts: float = field(default_factory=lambda: 0.0)
+
+    inbox_messages: List[tuple[NID, str]] = field(default_factory=list)
+
+    _next_seq: int = 0
 
     def start(self) -> None:
-        self.bt.start(self.on_message)
-        self._connect_to_network()
+        """
+        Start the Bluetooth manager and server listener.
+        """
+        self.bt.start(self.on_bt_data)
+        # Start listening for incoming RFCOMM connections
+        self.bt.start_server()
+        print(f"[NODE {self.my_nid}] Router started")
 
     def stop(self) -> None:
         self.bt.stop()
+        print(f"[NODE {self.my_nid}] Router stopped")
 
-    # --- network join -------------------------------------------------
-
-    def _connect_to_network(self) -> None:
-        """Lazy uplink selection: pick neighbor with lowest hop_count."""
-        nearby = self.bt.scan_nearby()
-        best_addr = None
-        best_hop = 999
-        for dev in nearby:
-            if 0 <= dev.hop_count < best_hop:
-                best_hop = dev.hop_count
-                best_addr = dev.address
-
-        if best_addr is None:
-            # stay disconnected
-            self.hop_count = 255
+    # ------------------------------------------------------------------
+    # Bluetooth callback
+    # ------------------------------------------------------------------
+    def on_bt_data(self, link_id: int, packet: bytes) -> None:
+        """
+        Called by BluetoothManager when bytes are received on a link.
+        We expect packet = [encoded_message_without_mac][mac(32)].
+        """
+        try:
+            buf, mac = split_packet(packet, mac_len=32)
+        except ValueError as e:
+            print(f"[NODE {self.my_nid}] malformed packet on link {link_id}: {e}")
             return
 
-        link_id = self.bt.connect_to(best_addr)
-        self.links[link_id] = LinkState(is_uplink=True, peer_hop_count=best_hop)
-        self.uplink_link_id = link_id
-        self.hop_count = best_hop + 1
-        # TODO: run mutual authentication + derive link key with SecurityContext
-
-    # --- message handling ---------------------------------------------
-
-    def on_message(self, link_id: int, msg: WireMessage) -> None:
-        # verify MAC
-        data_no_mac = encode_message(msg)
-        if not self.sec.verify_mac(link_id, data_no_mac, msg.mac):
-            # drop
+        if not self.sec.verify_mac(link_id, buf, mac):
+            print(f"[NODE {self.my_nid}] MAC verification failed on link {link_id}")
             return
 
-        # learn route back to src
-        self.routing.learn(msg.header.src, link_id, self.hop_count)
+        try:
+            msg = decode_message(buf, mac)
+        except Exception as e:
+            print(f"[NODE {self.my_nid}] decode error on link {link_id}: {e}")
+            return
+
+        # Learn a simple route back to the source (hop_count=1 is enough to start)
+        self.routing.learn(msg.header.src, link_id, hop_count=1)
 
         if msg.header.service == ServiceId.HEARTBEAT:
             self._handle_heartbeat(msg, link_id)
         elif msg.header.service == ServiceId.INBOX:
             self._handle_inbox(msg, link_id)
+        else:
+            # For other services, just forward for now
+            self._forward(msg, link_id)
 
+    # ------------------------------------------------------------------
+    # Heartbeat handling
+    # ------------------------------------------------------------------
     def _handle_heartbeat(self, msg: WireMessage, link_id: int) -> None:
-        self.last_heartbeat_ts = monotonic()
-        self.lost_heartbeats = 0
-
-        # Flood to all links except incoming
-        for lid in list(self.links.keys()):
-            if lid == link_id:
-                continue
-            self._send_on_link(lid, msg)
-
-    def _handle_inbox(self, msg: WireMessage, link_id: int) -> None:
-        if msg.header.dst == self.my_nid:
-            # deliver to local inbox (e.g. store for UI)
-            print(f"[NODE {self.my_nid}] Inbox from {msg.header.src}: {msg.payload.decode(errors='ignore')}")
+        """
+        Payload format: [counter(4 bytes)][signature...]
+        Signature is ECDSA over counter, generated by Sink.
+        """
+        if len(msg.payload) < 4:
             return
 
-        self._forward(msg, link_id)
+        counter = int.from_bytes(msg.payload[:4], "big")
+        signature = msg.payload[4:]
 
+        if not SecurityContext.verify_heartbeat(counter, signature, self.sink_cert_pem):
+            print(f"[NODE {self.my_nid}] invalid heartbeat signature")
+            return
+
+        self.last_heartbeat_ts = time.monotonic()
+        self.lost_heartbeats = 0
+
+        # First valid heartbeat -> treat this link as uplink
+        if self.uplink_link_id is None:
+            self.uplink_link_id = link_id
+            # One hop away from sink by definition
+            self.hop_count = 1
+            print(f"[NODE {self.my_nid}] Uplink established on link {link_id}")
+
+        # Forward heartbeat to other links (flooding)
+        self._flood(msg, incoming_link=link_id)
+
+    # ------------------------------------------------------------------
+    # Inbox handling
+    # ------------------------------------------------------------------
+    def _handle_inbox(self, msg: WireMessage, incoming_link: int) -> None:
+        if msg.header.dst == self.my_nid:
+            text = msg.payload.decode(errors="ignore")
+            self.inbox_messages.append((msg.header.src, text))
+            print(f"[NODE {self.my_nid}] Inbox message from {msg.header.src}: {text}")
+            return
+
+        # Not for us -> forward
+        self._forward(msg, incoming_link)
+
+    # ------------------------------------------------------------------
+    # Forwarding
+    # ------------------------------------------------------------------
     def _forward(self, msg: WireMessage, incoming_link: int) -> None:
+        dst = msg.header.dst
         out_link: Optional[int] = None
 
-        if msg.header.dst == SINK_NID:
-            if self.uplink_link_id is None:
-                return
+        # Try routing table first
+        entry = self.routing.lookup(dst)
+        if entry:
+            out_link = entry.link
+        elif dst == SINK_NID and self.uplink_link_id is not None:
+            # If we don't know a route, but dst is Sink, use uplink
             out_link = self.uplink_link_id
-        else:
-            entry = self.routing.lookup(msg.header.dst)
-            if entry:
-                out_link = entry.link
-            elif self.uplink_link_id is not None:
-                out_link = self.uplink_link_id
 
         if out_link is None or out_link == incoming_link:
+            # No way to forward, or would loop
             return
 
         self._send_on_link(out_link, msg)
         self.routed_count += 1
 
+    def _flood(self, msg: WireMessage, incoming_link: int) -> None:
+        """
+        Broadcast a message to all links except the one it came from.
+        For now, BluetoothManager doesn't give us all link IDs directly,
+        so we only forward via routing table's known links.
+        """
+        snapshot = self.routing.snapshot()
+        used_links = set()
+        for entry in snapshot.values():
+            if entry.link == incoming_link:
+                continue
+            if entry.link in used_links:
+                continue
+            self._send_on_link(entry.link, msg)
+            used_links.add(entry.link)
+
+    # ------------------------------------------------------------------
+    # Sending helpers
+    # ------------------------------------------------------------------
+    def _next_seq_num(self) -> int:
+        self._next_seq = (self._next_seq + 1) & 0xFFFFFFFF
+        return self._next_seq
+
     def _send_on_link(self, link_id: int, msg: WireMessage) -> None:
-        data = encode_message(msg)
-        msg.mac = self.sec.compute_mac(link_id, data)
-        self.bt.send(link_id, msg)
+        buf = encode_message(msg)
+        mac = self.sec.compute_mac(link_id, buf)
+        packet = buf + mac
+        self.bt.send(link_id, packet)
 
-    # --- heartbeat timeout --------------------------------------------
-
-    def tick(self, hb_interval: float = 5.0) -> None:
+    # ------------------------------------------------------------------
+    # Public API used by UI
+    # ------------------------------------------------------------------
+    def scan_and_connect_best(self) -> None:
         """
-        Call this periodically from your main loop.
-        If 3 heartbeats missed -> uplink down.
+        Scan for neighbors and connect to the one with the lowest hop_count.
+        If no hop info is available, just connect to the first device.
         """
-        now = monotonic()
-        if self.uplink_link_id is not None:
-            if now - self.last_heartbeat_ts > 3 * hb_interval:
-                self.lost_heartbeats += 1
-                print(f"[NODE {self.my_nid}] uplink seems dead, reconnecting")
-                self._on_uplink_down()
+        devices = self.bt.scan_nearby()
+        if not devices:
+            print(f"[NODE {self.my_nid}] No devices found during scan")
+            return
 
-    def _on_uplink_down(self) -> None:
-        # disconnect all
-        for lid in list(self.links.keys()):
-            self.bt.disconnect(lid)
-        self.links.clear()
-        self.routing = RoutingTable()
-        self.uplink_link_id = None
-        self.hop_count = 255
-        self._connect_to_network()
+        best: Optional[DeviceInfo] = None
 
-    # --- UI accessors --------------------------------------------------
+        for dev in devices:
+            # You can add filtering here (e.g., prefix in name)
+            if best is None:
+                best = dev
+            elif dev.hop_count < best.hop_count:
+                best = dev
 
-    def get_downlinks(self) -> List[NID]:
-        return [st.peer_nid for st in self.links.values() if not st.is_uplink and st.peer_nid]
+        if best is None:
+            print(f"[NODE {self.my_nid}] No suitable neighbor found")
+            return
+
+        print(f"[NODE {self.my_nid}] Connecting to best neighbor {best.address} ({best.name})")
+        link_id = self.bt.connect_to(best.address)
+
+        # TODO: In a real design, you would run a mutual-auth handshake here,
+        # exchanging certs and deriving a per-link key.
+        # For now, we use a fixed dummy key per link to get MAC working.
+        dummy_key = b"\x01" * 32
+        self.sec.set_link_key(link_id, dummy_key)
+
+        # First successful connection -> treat as uplink if none present
+        if self.uplink_link_id is None:
+            self.uplink_link_id = link_id
+            self.hop_count = best.hop_count + 1 if best.hop_count < 255 else 2
+            print(f"[NODE {self.my_nid}] Using link {link_id} as uplink (hop_count={self.hop_count})")
 
     def send_inbox_message(self, text: str) -> None:
+        """
+        Send a message from this node to the Sink's inbox.
+        """
         if self.uplink_link_id is None:
-            print("No uplink, cannot send")
+            print(f"[NODE {self.my_nid}] No uplink available, cannot send")
             return
 
         hdr = MessageHeader(
@@ -161,7 +250,43 @@ class NodeRouter:
             dst=SINK_NID,
             service=ServiceId.INBOX,
             client_id=1,
-            seq=0,  # you should keep a per-node sequence counter
+            seq=self._next_seq_num(),
         )
+
         msg = WireMessage(header=hdr, payload=text.encode(), mac=b"")
         self._send_on_link(self.uplink_link_id, msg)
+        print(f"[NODE {self.my_nid}] Sent Inbox message to Sink")
+
+    # ------------------------------------------------------------------
+    # Periodic heartbeat timeout logic
+    # ------------------------------------------------------------------
+    def tick(self, heartbeat_timeout: float = 15.0) -> None:
+        """
+        Call this periodically from a background thread.
+        If we don't see heartbeats for a while, we consider the uplink dead.
+        """
+        if self.uplink_link_id is None:
+            return
+        if self.last_heartbeat_ts == 0.0:
+            return
+
+        now = time.monotonic()
+        if now - self.last_heartbeat_ts > heartbeat_timeout:
+            self.lost_heartbeats += 1
+            print(f"[NODE {self.my_nid}] Heartbeat timeout, dropping uplink")
+            self._on_uplink_down()
+
+    def _on_uplink_down(self) -> None:
+        """
+        Drop uplink and clear routing table.
+        """
+        if self.uplink_link_id is not None:
+            # We don't know all link_ids here, only our uplink.
+            # In practice, you might track them all in this class.
+            # At least drop the uplink's key.
+            self.sec.drop_link_key(self.uplink_link_id)
+            self.uplink_link_id = None
+
+        self.hop_count = 255
+        self.routing = RoutingTable()
+        print(f"[NODE {self.my_nid}] Uplink down, routing table cleared")
