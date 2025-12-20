@@ -1,13 +1,16 @@
 # common/bluetooth.py
 
+import os
 import threading
+import subprocess
 import bluetooth
 from dataclasses import dataclass
 from typing import Dict, Callable, List
 
 MessageCallback = Callable[[int, bytes], None]
 
-RFCOMM_PORT = 3   # SPP RFCOMM channel
+RFCOMM_PORT = 3  # SPP RFCOMM channel
+
 
 @dataclass
 class DeviceInfo:
@@ -18,20 +21,40 @@ class DeviceInfo:
 
 class BluetoothManager:
     """
-    PyBluez Classic RFCOMM manager.
-    Sink = server
-    Nodes = clients only
+    PyBluez Classic RFCOMM manager with multi-adapter support.
+    Each instance binds to a specific Bluetooth adapter (hci0, hci1, ...).
     """
 
-    def __init__(self, enable_server: bool = False):
+    def __init__(self, enable_server: bool = False, adapter: str = "hci0"):
         self.enable_server = enable_server
-        self._callback: MessageCallback | None = None
+        self.adapter = adapter     # NEW
+        self.local_mac = self._get_mac_address()  # NEW
 
+        # Force PyBluez to use a specific adapter for scanning
+        os.environ["BLUETOOTH_DEVICE"] = self.adapter
+
+        self._callback: MessageCallback | None = None
         self._next_link = 1
         self._sockets: Dict[int, bluetooth.BluetoothSocket] = {}
         self._recv_threads: Dict[int, threading.Thread] = {}
 
         self._server_sock: bluetooth.BluetoothSocket | None = None
+
+        print(f"[BT] Initialized on adapter {self.adapter} ({self.local_mac})")
+
+    # ---------------------------------------------------------------
+    # Utility: Get MAC address of selected adapter
+    # ---------------------------------------------------------------
+    def _get_mac_address(self) -> str:
+        try:
+            out = subprocess.check_output(["hciconfig", self.adapter]).decode()
+            for line in out.splitlines():
+                line = line.strip()
+                if "BD Address:" in line:
+                    return line.split()[2]
+        except:
+            pass
+        raise RuntimeError(f"Cannot find MAC for {self.adapter}")
 
     # ================================================================
     # START
@@ -48,18 +71,21 @@ class BluetoothManager:
     # SERVER (Sink only)
     # ================================================================
     def start_server(self):
-        print("[BT] Starting RFCOMM server...")
+        print(f"[BT] Starting RFCOMM server on {self.adapter} ({self.local_mac})...")
 
         try:
             server_sock = bluetooth.BluetoothSocket(bluetooth.RFCOMM)
-            server_sock.bind(("", RFCOMM_PORT))
+
+            # NEW: bind to a specific adapter via MAC
+            server_sock.bind((self.local_mac, RFCOMM_PORT))
+
             server_sock.listen(1)
         except Exception as e:
             print(f"[BT] ERROR starting server: {e}")
             raise
 
         self._server_sock = server_sock
-        print(f"[BT] RFCOMM server listening on channel {RFCOMM_PORT}")
+        print(f"[BT] RFCOMM server listening on channel {RFCOMM_PORT} @ {self.adapter}")
 
         t = threading.Thread(target=self._accept_loop, daemon=True)
         t.start()
@@ -87,16 +113,20 @@ class BluetoothManager:
     # CLIENT MODE (Nodes)
     # ================================================================
     def connect_to(self, address: str) -> int:
-        print(f"[BT] Connecting to {address} via RFCOMM...")
+        print(f"[BT] Connecting via {self.adapter} ({self.local_mac}) to {address}...")
 
         sock = bluetooth.BluetoothSocket(bluetooth.RFCOMM)
+
+        # NEW: bind outbound socket to adapter
+        sock.bind((self.local_mac, 0))
+
         sock.connect((address, RFCOMM_PORT))
 
         link_id = self._next_link
         self._next_link += 1
         self._sockets[link_id] = sock
 
-        print(f"[BT] Connected on link {link_id}")
+        print(f"[BT] Connected on link {link_id} using {self.adapter}")
 
         t = threading.Thread(target=self._recv_loop, args=(link_id,), daemon=True)
         t.start()
@@ -108,7 +138,8 @@ class BluetoothManager:
     # SCAN
     # ================================================================
     def scan_nearby(self) -> List[DeviceInfo]:
-        print("[BT] Scanning for nearby BT devices...")
+        print(f"[BT] Scanning on adapter {self.adapter}...")
+
         raw = bluetooth.discover_devices(lookup_names=True)
 
         devices = []
