@@ -1,6 +1,18 @@
-How to execute
- - First start in other pc or dongle sink: python3 -m sync.main_sink
- - Start the node: python3 -m node.main_node
-   - its going to error so it gives you a node id (nid)
-   - after start the node with the nid: python3 -m node.main_node <nid>
- - after stablish connections, the interface is very intuitive
+# Projeto Final Segurança Informática e nas Comunicações
+---
+## How to execute
+1. Start in other pc or dongle sink:
+```
+ python3 -m sync.main_sink
+```
+2. Start the node:
+```
+python3 -m node.main_node
+```
+*Note: Gives an error, it generates the node id (nid)*
+
+3. After getting the node id (nid). Do:
+```
+python3 -m node.main_node <nid>
+```
+4. After connection established, the interface is intuitive.
