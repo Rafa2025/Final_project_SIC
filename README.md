@@ -13,7 +13,8 @@ python3 -m node.main_node
 3. Issue node certificate:
 ```
 bash issue_device_cert.sh
-```. After getting the node id (nid). Do:
+```
+4. After getting the node id (nid). Do:
 ```
 python3 -m node.main_node <nid>
 ```
