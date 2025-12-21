@@ -15,4 +15,4 @@ python3 -m node.main_node
 ```
 python3 -m node.main_node <nid>
 ```
-4. After connection established, the interface is intuitive.
+4. After establish connections, the interface is intuitive.
