@@ -11,10 +11,9 @@ python3 -m node.main_node
 ```
 *Note: Gives an error, it generates the network id (nid)*
 3. Issue node certificate:
-...
+```
 bash issue_device_cert.sh
-...
-4. After getting the node id (nid). Do:
+```. After getting the node id (nid). Do:
 ```
 python3 -m node.main_node <nid>
 ```
