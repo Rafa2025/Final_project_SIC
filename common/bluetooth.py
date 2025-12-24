@@ -1,19 +1,19 @@
 # common/bluetooth.py
 
-import os
+import os #Interface com o SO
 import threading
-import subprocess
+import subprocess #Permite controlar hardware
 import bluetooth
-from dataclasses import dataclass
-from typing import Dict, Callable, List
+from dataclasses import dataclass #Para a criação de classes
+from typing import Dict, Callable, List #Permite declarar tipos
 
-MessageCallback = Callable[[int, bytes], None]
+MessageCallback = Callable[[int, bytes], None] #Define um preset para funções
 
-RFCOMM_PORT = 3  # SPP RFCOMM channel
+RFCOMM_PORT = 3  # Canal SPP RFCOMM
 
 
 @dataclass
-class DeviceInfo:
+class DeviceInfo: #Informação sobre um dispositivo
     address: str
     name: str
     hop_count: int = 255
