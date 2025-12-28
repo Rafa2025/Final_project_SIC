@@ -20,6 +20,7 @@ from .inbox import InboxService
 
 
 SINK_NID = NID(bytes(16))  # 16-byte all-zero ID
+DEBUG_LINK_KEY = b"\x02" * 32
 
 
 @dataclass
@@ -43,6 +44,7 @@ class SinkRouter:
 
     def start(self) -> None:
     # BluetoothManager(enable_server=True) already starts server
+        self.bt.set_link_loss_callback(self._on_link_loss)
         self.bt.start(self.on_bt_data)
         print("[SINK] Router started")
 
@@ -63,6 +65,11 @@ class SinkRouter:
         except ValueError as e:
             print(f"[SINK] malformed packet on link {link_id}: {e}")
             return
+        
+        # Ensure we have a key for this link (lab-mode static key)
+        self.sec.set_link_key(link_id, DEBUG_LINK_KEY)
+        print(f"[SINK] rx {len(packet)} bytes on link {link_id}")
+
 
         # MAC verify
         if not self.sec.verify_mac(link_id, raw, mac):
@@ -89,6 +96,32 @@ class SinkRouter:
         else:
             # Unknown service -> possibly forward
             self._forward(msg, link_id)
+
+    # ------------------------------------------------------------------
+    # Link loss handling (cascade disconnection)
+    # ------------------------------------------------------------------
+    def _on_link_loss(self, lost_link_id: int) -> None:
+        if lost_link_id not in self.links:
+            return
+
+        lost_nid = self.links[lost_link_id]
+        print(f"[SINK] Link {lost_link_id} lost (NID: {lost_nid})")
+
+        # Remove the direct child
+        del self.links[lost_link_id]
+
+        # Find all routes that went through this link (direct and indirect)
+        routes_to_remove = [
+            nid for nid, entry in self.routing.snapshot().items()
+            if entry.link == lost_link_id
+        ]
+
+        # Remove routes
+        for nid in routes_to_remove:
+            self.routing.remove_link(lost_link_id)  # removes all via that link
+            print(f"[SINK] Removed route to {nid} via lost link {lost_link_id}")
+
+        # No further disconnection needed on Sink side — nodes will detect via heartbeat timeout
 
     # ------------------------------------------------------------------
     # Inbox

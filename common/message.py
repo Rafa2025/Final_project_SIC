@@ -16,7 +16,7 @@ class ServiceId(Enum):
     """
     INBOX = 1
     HEARTBEAT = 2
-    CONTROL = 3
+    HANDSHAKE = 3
 
 
 @dataclass
