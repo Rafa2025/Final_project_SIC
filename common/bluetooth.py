@@ -4,13 +4,14 @@ import os
 import threading
 import subprocess
 import bluetooth
+import time
 from dataclasses import dataclass
 from typing import Dict, Callable, List
 
 MessageCallback = Callable[[int, bytes], None]
 LinkLossCallback = Callable[[int], None]  # link_id
 
-RFCOMM_PORT = 3  # SPP RFCOMM channel
+RFCOMM_PORT = 0  # SPP RFCOMM channel
 
 @dataclass
 class DeviceInfo:
@@ -93,9 +94,16 @@ class BluetoothManager:
             server_sock = bluetooth.BluetoothSocket(bluetooth.RFCOMM)
 
             # NEW: bind to a specific adapter via MAC
-            server_sock.bind((self.local_mac, RFCOMM_PORT))
-
+            server_sock.bind((self.local_mac, 0))
             server_sock.listen(10)
+
+            bluetooth.advertise_service(
+                server_sock,
+                "SIC-RFCOMM",
+                service_classes=[bluetooth.SERIAL_PORT_CLASS],
+                profiles=[bluetooth.SERIAL_PORT_PROFILE],
+            )
+
         except Exception as e:
             print(f"[BT] ERROR starting server: {e}")
             raise
@@ -122,8 +130,11 @@ class BluetoothManager:
                 self._recv_threads[link_id] = t
 
             except Exception as e:
-                print(f"[BT] Server accept failed: {e}")
-                return
+                if self._server_sock is None:
+                    print("[BT] Server stopped, exiting accept loop")
+                    return
+                print(f"[BT] Server accept failed (retrying): {e}")
+                time.sleep(0.1)  # avoid busy loop on persistent error
 
     # ================================================================
     # CLIENT MODE (Nodes)
@@ -139,7 +150,14 @@ class BluetoothManager:
         except Exception as e:
             print(f"[BT] Bind error in connect_to: {e}")
         
-        sock.connect((address, RFCOMM_PORT))
+        services = bluetooth.find_service(address=address)
+        for s in services:
+            if s["name"] == "SIC-RFCOMM":
+                sock.connect((address, s["port"]))
+                break
+        else:
+            raise RuntimeError("RFCOMM service not found")
+
 
         link_id = self._next_link
         self._next_link += 1
@@ -260,4 +278,3 @@ class BluetoothManager:
                 pass
 
         print("[BT] Manager stopped")
-
