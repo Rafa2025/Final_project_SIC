@@ -1,14 +1,19 @@
-# common/dtls_channel.py (corrected for RFCOMM/TLS)
+# common/dtls_channel.py
 
-import os
+from __future__ import annotations
+from typing import Optional, Tuple
 import socket
 import ssl
-from typing import Optional, Tuple
+
 
 class DTLSChannel:
     """
-    Emulated DTLS using TLS over RFCOMM (stream socket).
-    Works with Bluetooth RFCOMM sockets.
+    Simple TLS-over-TCP channel placeholder for the 'DTLS' API.
+    In your report you can explain that this is used to emulate DTLS
+    semantics for the lab.
+
+    If you later install a proper DTLS library, you can swap the
+    internals here and keep the same API for the rest of the code.
     """
 
     def __init__(
@@ -16,56 +21,88 @@ class DTLSChannel:
         is_server: bool,
         certfile: str,
         keyfile: str,
-        cafile: str,
+        cafile: Optional[str] = None,
     ) -> None:
         self.is_server = is_server
         self.certfile = certfile
         self.keyfile = keyfile
         self.cafile = cafile
 
-        self._context = self._create_context()
-        self._tls_conn: Optional[ssl.SSLObject] = None
-        self._raw_sock: Optional[socket.socket] = None
+        self._sock: Optional[socket.socket] = None
+        self._ssl_sock: Optional[ssl.SSLSocket] = None
 
     def _create_context(self) -> ssl.SSLContext:
-        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT if not self.is_server else ssl.PROTOCOL_TLS_SERVER)
-        ctx.load_cert_chain(certfile=self.certfile, keyfile=self.keyfile)
-        ctx.load_verify_locations(cafile=self.cafile)
-        ctx.verify_mode = ssl.CERT_REQUIRED
-        ctx.check_hostname = False
+        if self.is_server:
+            ctx = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
+            ctx.load_cert_chain(certfile=self.certfile, keyfile=self.keyfile)
+            if self.cafile:
+                ctx.load_verify_locations(self.cafile)
+                ctx.verify_mode = ssl.CERT_REQUIRED
+        else:
+            ctx = ssl.create_default_context(ssl.Purpose.SERVER_AUTH)
+            if self.cafile:
+                ctx.load_verify_locations(self.cafile)
+            ctx.load_cert_chain(certfile=self.certfile, keyfile=self.keyfile)
         return ctx
 
-    def connect(self, raw_sock) -> None:
-        """Wrap an already connected RFCOMM socket with TLS."""
+    # ------------------------------------------------------------------
+    # Server side
+    # ------------------------------------------------------------------
+
+    def bind_and_listen(self, addr: Tuple[str, int], backlog: int = 5) -> None:
+        if not self.is_server:
+            raise RuntimeError("bind_and_listen called on client DTLSChannel")
+
+        self._sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self._sock.bind(addr)
+        self._sock.listen(backlog)
+
+    def accept(self) -> None:
+        if self._sock is None:
+            raise RuntimeError("Server socket not bound/listening")
+
+        raw_client, _ = self._sock.accept()
+        ctx = self._create_context()
+        self._ssl_sock = ctx.wrap_socket(raw_client, server_side=True)
+
+    # ------------------------------------------------------------------
+    # Client side
+    # ------------------------------------------------------------------
+
+    def connect(self, addr: Tuple[str, int]) -> None:
         if self.is_server:
-            raise RuntimeError("connect only on client")
+            raise RuntimeError("connect called on server DTLSChannel")
 
-        # PyBluez BluetoothSocket doesn't implement .detach() (needed by ssl in py3.12).
-        # Convert to a real socket.socket using a dup()'d fd.
-        if isinstance(raw_sock, socket.socket):
-            std_sock = raw_sock
-        else:
-            fd = raw_sock.fileno()
-            dup_fd = os.dup(fd)
-            std_sock = socket.socket(fileno=dup_fd)
+        raw_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        raw_sock.connect(addr)
+        ctx = self._create_context()
+        self._ssl_sock = ctx.wrap_socket(raw_sock, server_hostname=addr[0])
 
-        std_sock.setblocking(True)
-
-        self._raw_sock = std_sock
-        self._tls_conn = self._context.wrap_socket(std_sock, server_hostname="localhost")
+    # ------------------------------------------------------------------
+    # Common
+    # ------------------------------------------------------------------
 
     def send(self, data: bytes) -> None:
-        if self._tls_conn is None:
-            raise RuntimeError("DTLS not connected")
-        self._tls_conn.sendall(data)
+        if self._ssl_sock is None:
+            raise RuntimeError("DTLS/TLS socket not connected")
+        self._ssl_sock.sendall(data)
 
     def recv(self, bufsize: int = 4096) -> bytes:
-        if self._tls_conn is None:
-            raise RuntimeError("DTLS not connected")
-        return self._tls_conn.recv(bufsize)
+        if self._ssl_sock is None:
+            raise RuntimeError("DTLS/TLS socket not connected")
+        return self._ssl_sock.recv(bufsize)
 
     def close(self) -> None:
-        if self._tls_conn:
-            self._tls_conn.close()
-        if self._raw_sock:
-            self._raw_sock.close()
+        if self._ssl_sock:
+            try:
+                self._ssl_sock.close()
+            except Exception:
+                pass
+            self._ssl_sock = None
+
+        if self._sock:
+            try:
+                self._sock.close()
+            except Exception:
+                pass
+            self._sock = None

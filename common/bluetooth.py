@@ -1,56 +1,47 @@
 # common/bluetooth.py
 
-import os
+import os #Interface com o SO
 import threading
-import subprocess
+import subprocess #Permite controlar hardware
 import bluetooth
-import time
-from dataclasses import dataclass
-from typing import Dict, Callable, List
+from dataclasses import dataclass #Para a criação de classes
+from typing import Dict, Callable, List #Permite declarar tipos
 
-MessageCallback = Callable[[int, bytes], None]
-LinkLossCallback = Callable[[int], None]  # link_id
+MessageCallback = Callable[[int, bytes], None] #Define um esqueleto para funções
 
-RFCOMM_PORT = 0  # SPP RFCOMM channel
+RFCOMM_PORT = 3  # Canal SPP RFCOMM
+
 
 @dataclass
-class DeviceInfo:
+class DeviceInfo: #Informação sobre um dispositivo
     address: str
     name: str
-    hop_count: int = -1
+    hop_count: int = 255
 
 
-class BluetoothManager:
-    """
-    PyBluez Classic RFCOMM manager with multi-adapter support.
-    Each instance binds to a specific Bluetooth adapter (hci0, hci1, ...).
-    """
+class BluetoothManager: #Gestor das comunicações Bluetooth RFCOMM (simula uma porta em série) do PyBluez 
+                        #(biblioteca Python para comunicação Bluetooth) que suporta vários adaptadores (cada 
+                        #instância liga-se a um)
 
-    def __init__(self, enable_server: bool = False, adapter: str = "hci0"):
-        self.enable_server = enable_server
-        self.adapter = adapter     
-        self.local_mac = self._get_mac_address()  
+    def __init__(self, enable_server: bool = False, adapter: str = "hci0"): #Construtor da classe
+        self.enable_server = enable_server #Bool para determinar se funcionam como servidor (aceitam conexões de
+                                           #conexões de outros dispositivos)
+        self.adapter = adapter #Indica a que adaptador se conectar
+        self.local_mac = self._get_mac_address() #Descobre a MAC address do adaptador utilizado
 
-        # Force PyBluez to use a specific adapter for scanning
-        os.environ["BLUETOOTH_DEVICE"] = self.adapter
+        os.environ["BLUETOOTH_DEVICE"] = self.adapter #Força o PyBluez a usar um adaptador específico
 
-        self._callback: MessageCallback | None = None
-        self._next_link = 1
-        self._sockets: Dict[int, bluetooth.BluetoothSocket] = {}
-        self._recv_threads: Dict[int, threading.Thread] = {}
+        self._callback: MessageCallback | None = None #Define a função de callback, é chamada cada vez que chegam
+                                                      #dados a um socket
+        self._next_link = 1 #Contador de links
+        self._sockets: Dict[int, bluetooth.BluetoothSocket] = {} #Guarda os sockets (pontos de comunicação entre
+                                                                 #dois dispositivos) que estão ativos
+        self._recv_threads: Dict[int, threading.Thread] = {} #Guarda as threads criadas para cada conexão ativa
 
-        self._server_sock: bluetooth.BluetoothSocket | None = None
+        self._server_sock: bluetooth.BluetoothSocket | None = None #Socket que espera por pedidos de conexão
+                                                                   #feitos por outros dispositivos
 
         print(f"[BT] Initialized on adapter {self.adapter} ({self.local_mac})")
-
-        # Set initial name
-        initial_hop = 0 if enable_server else -1
-        self.set_name(f"MESH|{initial_hop}")
-        self._on_link_loss: LinkLossCallback | None = None
-    
-    
-    def set_link_loss_callback(self, callback: LinkLossCallback) -> None:
-        self._on_link_loss = callback
 
     # ---------------------------------------------------------------
     # Utility: Get MAC address of selected adapter
@@ -65,13 +56,6 @@ class BluetoothManager:
         except:
             pass
         raise RuntimeError(f"Cannot find MAC for {self.adapter}")
-    
-    def set_name(self, name: str) -> None:
-        try:
-            subprocess.check_call(["hciconfig", self.adapter, "name", name])
-            print(f"[BT] Set device name to {name} on {self.adapter}")
-        except Exception as e:
-            print(f"[BT] Failed to set name: {e}")
 
     # ================================================================
     # START
@@ -94,16 +78,9 @@ class BluetoothManager:
             server_sock = bluetooth.BluetoothSocket(bluetooth.RFCOMM)
 
             # NEW: bind to a specific adapter via MAC
-            server_sock.bind((self.local_mac, 0))
-            server_sock.listen(10)
+            server_sock.bind((self.local_mac, RFCOMM_PORT))
 
-            bluetooth.advertise_service(
-                server_sock,
-                "SIC-RFCOMM",
-                service_classes=[bluetooth.SERIAL_PORT_CLASS],
-                profiles=[bluetooth.SERIAL_PORT_PROFILE],
-            )
-
+            server_sock.listen(1)
         except Exception as e:
             print(f"[BT] ERROR starting server: {e}")
             raise
@@ -130,11 +107,8 @@ class BluetoothManager:
                 self._recv_threads[link_id] = t
 
             except Exception as e:
-                if self._server_sock is None:
-                    print("[BT] Server stopped, exiting accept loop")
-                    return
-                print(f"[BT] Server accept failed (retrying): {e}")
-                time.sleep(0.1)  # avoid busy loop on persistent error
+                print(f"[BT] Server accept failed: {e}")
+                return
 
     # ================================================================
     # CLIENT MODE (Nodes)
@@ -145,19 +119,9 @@ class BluetoothManager:
         sock = bluetooth.BluetoothSocket(bluetooth.RFCOMM)
 
         # NEW: bind outbound socket to adapter
-        try:
-            sock.bind((self.local_mac, 0))
-        except Exception as e:
-            print(f"[BT] Bind error in connect_to: {e}")
-        
-        services = bluetooth.find_service(address=address)
-        for s in services:
-            if s["name"] == "SIC-RFCOMM":
-                sock.connect((address, s["port"]))
-                break
-        else:
-            raise RuntimeError("RFCOMM service not found")
+        sock.bind((self.local_mac, 0))
 
+        sock.connect((address, RFCOMM_PORT))
 
         link_id = self._next_link
         self._next_link += 1
@@ -177,16 +141,11 @@ class BluetoothManager:
     def scan_nearby(self) -> List[DeviceInfo]:
         print(f"[BT] Scanning on adapter {self.adapter}...")
 
-        try:
-            dev_id = int(self.adapter.replace("hci", ""))
-        except:
-            dev_id = -1
-
-        raw = bluetooth.discover_devices(lookup_names=True, device_id=dev_id)
+        raw = bluetooth.discover_devices(lookup_names=True)
 
         devices = []
         for addr, name in raw:
-            hop = -1
+            hop = 255
             if "|" in name:
                 try:
                     hop = int(name.split("|")[1])
@@ -215,34 +174,19 @@ class BluetoothManager:
     # ================================================================
     def _recv_loop(self, link_id: int):
         sock = self._sockets[link_id]
-        while link_id in self._sockets:  # Check if socket still exists
+        while True:
             try:
                 data = sock.recv(4096)
                 if not data:
-                    print(f"[BT] Link {link_id}: closed by peer (empty recv)")
-                    if self._on_link_loss:
-                        self._on_link_loss(link_id)
+                    print(f"[BT] Link {link_id}: closed by peer")
                     self.disconnect(link_id)
                     return
 
                 if self._callback:
                     self._callback(link_id, data)
 
-            except OSError as e:
-                if e.errno in (9, 107, 32):  # Bad fd, transport shutdown, broken pipe
-                    print(f"[BT] Link {link_id}: socket closed ({e})")
-                    if self._on_link_loss:
-                        self._on_link_loss(link_id)
-                    self.disconnect(link_id)
-                    return
-                else:
-                    print(f"[BT] Temporary receive error on link {link_id}: {e}")
-                    continue  # Retry on temporary errors
-
             except Exception as e:
-                print(f"[BT] Unexpected receive error on link {link_id}: {e}")
-                if self._on_link_loss:
-                    self._on_link_loss(link_id)
+                print(f"[BT] Receive error on link {link_id}: {e}")
                 self.disconnect(link_id)
                 return
 

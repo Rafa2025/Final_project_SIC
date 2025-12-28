@@ -10,7 +10,6 @@ from common.security import SecurityContext, CertAndKey
 from .router import SinkRouter
 from .heartbeat import HeartbeatService
 from .inbox import InboxService
-from .sink_ui import SinkUI  # new import
 
 
 def load_sink_certs() -> SecurityContext:
@@ -36,11 +35,11 @@ def main() -> None:
     hb = HeartbeatService(router, sec, interval=5.0)
     hb.start()
 
-    ui = SinkUI(router)
     print("[SINK] Running. Press Ctrl+C to stop.")
 
     try:
-        ui.run()
+        while True:
+            time.sleep(1)
     except KeyboardInterrupt:
         pass
     finally:
