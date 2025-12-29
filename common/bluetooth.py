@@ -1,45 +1,60 @@
 # common/bluetooth.py
 
-import os
+import os #Interface com o SO
 import threading
-import subprocess
+import subprocess #Permite controlar hardware
 import bluetooth
+<<<<<<< HEAD
 import subprocess
 from dataclasses import dataclass
 from typing import Dict, Callable, List
 
 MessageCallback = Callable[[int, bytes], None]
 LinkLossCallback = Callable[[int], None]  # link_id
+=======
+from dataclasses import dataclass #Para a criação de classes
+from typing import Dict, Callable, List #Permite declarar tipos
 
-RFCOMM_PORT = 3  # SPP RFCOMM channel
+MessageCallback = Callable[[int, bytes], None] #Define um esqueleto para funções
+>>>>>>> 84af3c4f1867dd8fa7e063ec927ed77a440ec771
+
+RFCOMM_PORT = 3  # Canal SPP RFCOMM
 
 @dataclass
-class DeviceInfo:
+class DeviceInfo: #Informação sobre um dispositivo
     address: str
     name: str
     hop_count: int = -1
 
 
-class BluetoothManager:
-    """
-    PyBluez Classic RFCOMM manager with multi-adapter support.
-    Each instance binds to a specific Bluetooth adapter (hci0, hci1, ...).
-    """
+class BluetoothManager: #Gestor das comunicações Bluetooth RFCOMM (simula uma porta em série) do PyBluez 
+                        #(biblioteca Python para comunicação Bluetooth) que suporta vários adaptadores (cada 
+                        #instância liga-se a um)
 
+<<<<<<< HEAD
     def __init__(self, enable_server: bool = False, adapter: str = "hci0"):
         self.enable_server = enable_server
         self.adapter = adapter     
         self.local_mac = self._get_mac_address()  
+=======
+    def __init__(self, enable_server: bool = False, adapter: str = "hci0"): #Construtor da classe
+        self.enable_server = enable_server #Bool para determinar se funcionam como servidor (aceitam conexões de
+                                           #conexões de outros dispositivos)
+        self.adapter = adapter #Indica a que adaptador se conectar
+        self.local_mac = self._get_mac_address() #Descobre a MAC address do adaptador utilizado
+>>>>>>> 84af3c4f1867dd8fa7e063ec927ed77a440ec771
 
-        # Force PyBluez to use a specific adapter for scanning
-        os.environ["BLUETOOTH_DEVICE"] = self.adapter
+        os.environ["BLUETOOTH_DEVICE"] = self.adapter #Força o PyBluez a usar um adaptador específico
 
-        self._callback: MessageCallback | None = None
-        self._next_link = 1
-        self._sockets: Dict[int, bluetooth.BluetoothSocket] = {}
-        self._recv_threads: Dict[int, threading.Thread] = {}
+        self._callback: MessageCallback | None = None #Define a função de callback, é chamada cada vez que chegam
+                                                      #dados a um socket
+        self._next_link = 1 #Contador de links
+        self._sockets: Dict[int, bluetooth.BluetoothSocket] = {} #Guarda os sockets (pontos de comunicação entre
+                                                                 #dois dispositivos) que estão ativos
+        self._recv_threads: Dict[int, threading.Thread] = {} #Guarda as threads criadas para cada conexão ativa
 
-        self._server_sock: bluetooth.BluetoothSocket | None = None
+        self._server_sock: bluetooth.BluetoothSocket | None = None #Socket que espera por pedidos de conexão
+                                                                   #feitos por outros dispositivos
 
         print(f"[BT] Initialized on adapter {self.adapter} ({self.local_mac})")
 

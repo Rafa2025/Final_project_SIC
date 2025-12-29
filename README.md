@@ -1,273 +1,125 @@
-# Projeto Final SIC (Segurança Informática e nas Comunicações)
+# **Bluetooth-based, secure ad-hoc network for IoT devices**
+## Projeto Final Segurança Informática e nas Comunicações
+
+### Módulos:
+* Certs
+* Common
+* Node
+* Support
+* Sync
+
+---
+### 1. certs
+
+> Ondem ficam os certificados gerados/obtidos.
+
+---
+### 2. **common**
+> **nid.py**
+> ---
+> Define o identificador único de 128 bits (NID) para cada nó de rede. Permite criar NIDs aleatórios ou a partir de hex, essenciais para o endereçamento na rede mesh.
+ 
+> **message.py**
+> ---
+>Implementa o formato de mensagens da rede: header(origem, destino, serviço, seq) + payload + MAC. Funções de serialização/deserialização para transmissão via Bluetooth.
+ 
+> **bluetooth.py**
+> ---
+> Gestor principal Bluetooth RFCOMM. Suporta múltiplos adaptadores (hci0, hci1), permite scanning de dispositivos próximos, estabelecer conexões cliente/servidor, e enviar/receber dados em threads dedicadas.
+
+> **routing.py**
+> ---
+> Tabela de encaminhamento que aprende rotas (NID → link_id + hop_count). Mantém sempre a rota com menor número de saltos e remove entradas quando links caem.
+
+> **security.py**
+> ---
+>Gestão de segurança:
+> * Validação de Certiificados X.509
+> * Derivação de chaves simétricas via ECDH
+> * MACs (HMAC-SHA256) para autenticação de mensagens por link
+> * Assinatura/verificação de heartbeats (ECDSA)
+
+> **dtls_channel.py**
+> ---
+> Chamada de segurança TLS-over-TCP (emula DTLS). Usado para handshakes seguros e troca inicial de certificados entre nó.
+
+---
+### 3. node
+
+> **router.py**
+> ---
+> Núcleo do nó mesh. Gere:
+> * **Uplink**: conexão ao nó mais próximo do Sink (menor hop_count)
+> * **Roteamento**: aprende rotas via mensagens recebidas, encaminha para destino ou Sink.
+> * **Heartbeats**: valida assinaturas do Sink, mantém uplink ativo, flooding para outros nós.
+> * **Inbox**: recebe/envia mensagens, encaminha se não for destinatário.
+> * **Timeouts**: deteta perda de uplink (sem heartbeats) e reconecta
+> * **Scanning**: procura vizinhos e conecta ao que possui o melhor hop_count
+
+> **ui.py**
+> ---
+> Interface para interação com o nó:
+> * Visualizar status (NID, hop_count, uplink, estatísticas)
+> * Scan de dispositivos Bluetooth próximos
+> * Escolher dispositivo a conectar
+> * Enviar mensagens de texto para o Sink
+> * Ver inbox de mensagens recebidas
+
+> **main_node.py**
+>---
+> Bootstrap do nó:
+> * Carrega certificados (device, CA, Sink) baseados no NID
+> * Inicializa Bluetooth Manager, SecurityContext e NodeRouter
+> * Thread para heartbeat timeouts (verifica a cada 1s)
+> * Lança UI interativa
+> * Aceita NID via argumento CLI ou gera aleatório
+---
+### 4. support 
+
+> **make_ca.sh**
+> ---
+> Cria a Autoridade Certificadora (CA) raiz com chave privada EC P-521 e certificado auto-assinado válido por 10 anos, guardado em certs/ca/
+
+> **issue_device_cert.sh**
+> ---
+> Gera certificado individual para cada dispositivo (nó ou sink) identificado pelo NID hex. Cria chave privada EC P-521, CSR, e certificado assinado pela CA válido por 1 ano, guardado em /certs/<nid_hex>. Usado para autenticação mútua ECDH na rede mesh.
+---
+### 5. sync
+> **router.py** (SinkRouter)
+> ---
+> Router central do Sink que aceita conexões Bluetooth dos nós, valida MACs de cada mensagem recebida, aprende rotas dinamicamente (NID→link_id), encaminha mensagens entre nós se necessário, e distribui heartbeats para toda a rede através de broadcast para todos os links ativos.
+
+> **heartbeat.py** (HearbeatService)
+> ---
+> Serviço em thread separada que gera heartbeats assinados (ECDSA) a cada 5 segundos com contador incremental, permitindo aos nós validar autenticidade do Sink e manter sincronização da rede.
+
+> **inbox.py** (InboxService)
+> ---
+> Serviço simples que recebe e armazena mensagens enviadas pelos nós para o Sink, decodifica payloads em texto e mantém lista com origem (NID), client_id e conteúdo.
+
+> **main_sink.py**
+> ---
+> Bootstrap do Sink que carrega certificados (sink, CA), inicializa Bluetooth em modo servidor, cria router e serviços (inbox, heartbeat), e mantém execução contínua até interrupção manual.
 
 ---
 
-# **Planeamento de Atividades — Projeto SIC (Bluetooth IoT Ad-Hoc Network)**
-
-**Duração recomendada:** 6–8 semanas
-**Equipa:** 4 elementos
-**Estrutura:** Sprints modulares + milestones importantes
-
----
-
-# **Visão Geral dos Módulos**
-
-1. **Bluetooth base + descoberta + ligações**
-2. **Controlo de rede + interface CLI**
-3. **Certificados + CA + autenticação + sessão**
-4. **Encaminhamento + forwarding table + MACs**
-5. **Heartbeat + deteção de falhas**
-6. **Service Inbox + DTLS**
-7. **Integração final + documentação**
-
----
-
-# **Sprint 1 — Bluetooth básico (sem segurança)**
-
-### **Objetivo**
-
-Criar uma base funcional para ligações BLE e controlo manual.
-
-### **Tarefas**
-
-* Configurar ambiente Linux + simpleBLE em todos os nós.
-* Desativar blueman/NetworkManager BT.
-* Implementar:
-
-  * Scan de dispositivos BLE próximos
-  * Conexão/desconexão BLE entre dois nós
-  * Troca básica de mensagens (sem segurança)
-* Criar interface básica (CLI/TUI) mostrando:
-
-  * NID (placeholder temporário)
-  * Estado do uplink
-  * Lista de downlinks
-
-### **Entregáveis**
-
-* Códigos `node/` e `sync/` com ligação BLE funcional.
-* Script simples para testar envio/receção.
-
-### **Critério de Aceitação**
-
-> Dois nós conseguem conectar-se por BLE e trocar mensagens raw.
-
----
-
-#  **Sprint 2 — Controlo de rede + topologia em árvore**
-
-### **Objetivo**
-
-Gerir ligações de uplink/downlink e lógica de árvore (sem segurança ainda).
-
-### **Tarefas**
-
-* Gerar temporariamente hop count local (manual).
-* Implementar:
-
-  * Descoberta de vizinhos + leitura do hop count deles.
-  * Seleção de uplink com menor hop count.
-  * Armazenamento de downlinks.
-  * Queda do uplink → remover toda a subárvore.
-  * Reconexão automática.
-* Atualizar interface CLI:
-
-  * hop atual
-  * uplink NID
-  * downlinks com NID
-
-### **Entregáveis**
-
-* Topologia automática tipo árvore com reconexão quando um nó falha.
-
-### **Critério de Aceitação**
-
-> A rede forma uma árvore, e quando um nó perde o uplink, todo o sub-nó reconecta.
-
----
-
-#  **Sprint 3 — CA + Certificados + Identidades (common/ support/)**
-
-### **Objetivo**
-
-Implementar infraestrutura de identificação e autenticação.
-
-### **Tarefas**
-
-* Criar uma pequena CA local:
-
-  * geração de chaves P-521
-  * emissão de certificados X.509
-  * certificado especial para o Sink
-* Implementar:
-
-  * Geração de NID = hash público (ou random 128-bit)
-  * Armazenamento do certificado no device
-  * Verificação mutua após conexão BLE
-
-### **Entregáveis**
-
-* `support/ca_tool.py` capaz de criar certificados.
-* IoT nodes verificam certificados ao conectar.
-
-### **Critério de Aceitação**
-
-> Dois nós só estabelecem link BLE completo se ambos validarem os certificados da CA.
-
----
-
-#  **Sprint 4 — Sessão segura + MAC + prevenção replay**
-
-### **Objetivo**
-
-Criar segurança ao nível da comunicação por saltos (hop-by-hop).
-
-### **Tarefas**
-
-* Implementar protocolo de autenticação:
-
-  * Diffie-Hellman ECDH P-521
-  * Derivação de chave simétrica (HKDF)
-* Criar sessão com:
-
-  * session key
-  * contador TX local por ligação
-* Criar MAC (HMAC-SHA256):
-
-  * anexado a *todas* as mensagens hop-by-hop
-  * cada ligação BLE tem sessão independente
-
-### **Entregáveis**
-
-* Mensagens têm MAC válido e rejeitam replay.
-* Cada ligação tem uma sessão independente funcional.
-
-### **Critério de Aceitação**
-
-> Mensagens alteradas são rejeitadas e duplicados são detetados.
-
----
-
-#  **Sprint 5 — Roteamento + forwarding tables**
-
-### **Objetivo**
-
-Criar full routing do tipo switch com armazenamento da origem.
-
-### **Tarefas**
-
-* Definir formato do header:
-
-  ```
-  [src NID | dst NID | service | client | counter | ... ]
-  ```
-* Encaminhamento uplink & downlink:
-
-  * memorizar origem → tabela de forwarding
-  * usar tabela para tráfego descendente
-* Atualizar CLI:
-
-  * forwarding table completa
-  * contagem de mensagens encaminhadas
-
-### **Entregáveis**
-
-* Mensagens do Sink chegam ao IoT profundo e vice-versa.
-* Atualização correta da forwarding table.
-
-### **Critério de Aceitação**
-
-> E envia msg → passa por B → chega ao Sink e devolve corretamente.
-
----
-
-#  **Sprint 6 — Heartbeat + deteção automática de falhas**
-
-### **Objetivo**
-
-Adicionar liveness real e reorganização automática.
-
-### **Tarefas**
-
-* Sink envia heartbeat assinado com chave privada.
-* Lógica de flooding downlink.
-* IoT nodes:
-
-  * validam assinatura
-  * reenviam para downlinks
-  * detetam perda após 3 heartbeats
-  * quebram uplink
-  * reconectam rede
-
-### **Entregáveis**
-
-* Rede reorganiza-se automaticamente quando uma ligação é cortada.
-* CLI mostra:
-
-  * número de heartbeats perdidos
-
-### **Critério de Aceitação**
-
-> Desligar um nó → subárvore perde 3 heartbeats → reconstrói rede sozinha.
-
----
-
-#  **Sprint 7 — End-to-end DTLS + Inbox service**
-
-### **Objetivo**
-
-Implementar serviço final com segurança e ligação Sink ↔ IoT.
-
-### **Tarefas**
-
-* Adicionar endpoint DTLS:
-
-  * certificação baseada nos mesmos certificados de link
-  * criação de secure channel IoT ↔ Sink
-* Criar serviço Inbox no Sink:
-
-  * recebe msg + regista NID do autor
-* Criar cliente Inbox no nó:
-
-  * envio manual via CLI
-
-### **Entregáveis**
-
-* Comunicação segura da app no nó para o Sink.
-* Sink imprime todas as mensagens recebidas.
-
-### **Critério de Aceitação**
-
-> Um nó envia msg → passa por multi-hop → DTLS protege ponta-a-ponta → Sink recebe.
-
----
-
-#  **Sprint 8 — Integração final + testes + README**
-
-### **Objetivo**
-
-Unificar tudo, testar, corrigir e preparar entrega.
-
-### **Tarefas**
-
-* Criar testes:
-
-  * rede em linha
-  * rede em estrela
-  * falha de nó intermediário
-  * reconexão
-  * repetição de mensagens (prevenção replay)
-* Criar vídeo de demonstração (opcional)
-* Criar `README.md` com:
-
-  * arquitetura
-  * decisões justificadas
-  * partes incompletas
-  * contribuição %
-* Criar ZIP final com:
-
-  * `/node`
-  * `/sync`
-  * `/common`
-  * `/support`
----
+## How to execute
+1. Start in other pc or dongle sink:
+```
+ python3 -m sync.main_sink
+```
+2. Start the node:
+```
+python3 -m node.main_node
+```
+*Note: Gives an error, it generates the network id (nid)*
+
+3. Issue node certificate:
+```
+bash issue_device_cert.sh
+```
+4. After getting the node id (nid). Do:
+```
+python3 -m node.main_node <nid>
+```
+5. After establish connections, the interface is intuitive.
