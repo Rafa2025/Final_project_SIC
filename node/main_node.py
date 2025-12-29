@@ -46,6 +46,9 @@ def main() -> None:
         nid_hex = my_nid.to_hex()
         print(f"[NODE] No NID provided on command line, using random NID: {nid_hex}")
 
+    adapter = sys.argv[2] if len(sys.argv) >= 3 else "hci0"
+    print(f"[NODE] Using Bluetooth adapter: {adapter}")
+
     try:
         sec, sink_cert_pem = load_security(nid_hex)
     except FileNotFoundError as e:
@@ -53,7 +56,7 @@ def main() -> None:
         print("       Make sure you ran the CA and device cert generation scripts.")
         sys.exit(1)
 
-    bt = BluetoothManager(enable_server=False, adapter="hci0")
+    bt = BluetoothManager(enable_server=False, adapter=adapter)  # client-only
     router = NodeRouter(my_nid=my_nid, bt=bt, sec=sec, sink_cert_pem=sink_cert_pem)
     router.start()
 

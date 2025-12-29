@@ -14,6 +14,8 @@ from cryptography.hazmat.primitives import (
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
+from common.message import ServiceId
+
 
 @dataclass
 class CertAndKey:
@@ -40,6 +42,9 @@ class SecurityContext:
         # link_id -> symmetric key bytes
         self._link_keys: Dict[int, bytes] = {}
 
+        # For anti-replay: per link_id, last seq per service/client_id
+        self._seq_trackers: Dict[int, Dict[tuple[ServiceId, int], int]] = {}  # link_id -> (service, client_id) -> last_seq
+
     # ------------------------------------------------------------------
     # Certificate / ECDH / Session Key Derivation
     # ------------------------------------------------------------------
@@ -62,28 +67,67 @@ class SecurityContext:
         )
         return peer_cert
 
-    def derive_link_key_from_cert(self, link_id: int, peer_cert_pem: bytes) -> None:
-        """
-        Perform ECDH between our device key and the peer's public key extracted
-        from its certificate. Use HKDF-SHA256 to derive a symmetric key.
-        """
+    def derive_link_key_ephemeral(self, link_id: int, peer_cert_pem: bytes, my_ephem_priv: ec.EllipticCurvePrivateKey, peer_ephem_pub: ec.EllipticCurvePublicKey) -> None:
         peer_cert = self._verify_peer_cert(peer_cert_pem)
-        peer_public_key = peer_cert.public_key()
+        # Verify it's issued by CA, etc.
 
-        if not isinstance(self._device_key, ec.EllipticCurvePrivateKey):
-            raise TypeError("Device private key is not an EC key")
+        # Derive shared secret with ephemeral keys
+        shared = my_ephem_priv.exchange(ec.ECDH(), peer_ephem_pub)
 
-        shared = self._device_key.exchange(ec.ECDH(), peer_public_key)
-
-        # Derive a 256-bit key from the shared secret
+        # HKDF to get session key
         hkdf = HKDF(
             algorithm=hashes.SHA256(),
-            length=32,  # 256-bit key
+            length=32,
             salt=None,
-            info=b"SIC-IoT-link-key",
+            info=b"iot-mesh-session-key",
         )
         key = hkdf.derive(shared)
         self._link_keys[link_id] = key
+
+    # New: generate ephemeral key pair
+    def generate_ephemeral(self) -> tuple[ec.EllipticCurvePrivateKey, ec.EllipticCurvePublicKey]:
+        priv = ec.generate_private_key(ec.SECP521R1())
+        pub = priv.public_key()
+        return priv, pub
+
+    # New: serialize pubkey
+    @staticmethod
+    def serialize_pubkey(pub: ec.EllipticCurvePublicKey) -> bytes:
+        return pub.public_bytes(
+            encoding=serialization.Encoding.X962,
+            format=serialization.PublicFormat.UncompressedPoint
+        )
+
+    # New: deserialize pubkey
+    @staticmethod
+    def deserialize_pubkey(pub_bytes: bytes) -> ec.EllipticCurvePublicKey:
+        return ec.EllipticCurvePublicKey.from_encoded_point(ec.SECP521R1(), pub_bytes)
+
+    # New: sign data
+    def sign_data(self, data: bytes) -> bytes:
+        if not isinstance(self._device_key, ec.EllipticCurvePrivateKey):
+            raise TypeError("Device key not EC")
+        return self._device_key.sign(data, ec.ECDSA(hashes.SHA256()))
+
+    # New: verify signature
+    def verify_data(self, pub: ec.EllipticCurvePublicKey, data: bytes, sig: bytes) -> bool:
+        try:
+            pub.verify(sig, data, ec.ECDSA(hashes.SHA256()))
+            return True
+        except:
+            return False
+
+    # For anti-replay: check and update seq
+    def check_seq(self, link_id: int, service: ServiceId, client_id: int, seq: int) -> bool:
+        key = (service, client_id)
+        if link_id not in self._seq_trackers:
+            self._seq_trackers[link_id] = {}
+        tracker = self._seq_trackers[link_id]
+        last = tracker.get(key, -1)
+        if seq <= last:
+            return False  # replay or old
+        tracker[key] = seq
+        return True
 
     def set_link_key(self, link_id: int, key: bytes) -> None:
         """
@@ -94,6 +138,9 @@ class SecurityContext:
 
     def drop_link_key(self, link_id: int) -> None:
         self._link_keys.pop(link_id, None)
+
+    def has_link_key(self, link_id: int) -> bool:
+        return link_id in self._link_keys
 
     # ------------------------------------------------------------------
     # MAC (HMAC-SHA256)
