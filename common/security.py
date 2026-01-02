@@ -141,6 +141,16 @@ class SecurityContext:
 
     def has_link_key(self, link_id: int) -> bool:
         return link_id in self._link_keys
+    
+    def ensure_link_key(self, link_id: int, key: bytes) -> None:
+        """
+        Force-set a link key (used only in debug/lab mode with static key).
+        Creates the key if missing, or overwrites if present.
+        """
+        if len(key) != 32:
+            raise ValueError("Link key must be 32 bytes")
+        self._link_keys[link_id] = key
+        print(f"[SEC] Forced debug link key for link {link_id}")
 
     # ------------------------------------------------------------------
     # MAC (HMAC-SHA256)

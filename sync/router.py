@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import subprocess
 from typing import Dict, Optional
 
 from common.nid import NID
@@ -118,10 +119,19 @@ class SinkRouter:
 
         # Remove routes
         for nid in routes_to_remove:
-            self.routing.remove_link(lost_link_id)  # removes all via that link
+            self.routing.remove_link(lost_link_id)
             print(f"[SINK] Removed route to {nid} via lost link {lost_link_id}")
 
-        # No further disconnection needed on Sink side — nodes will detect via heartbeat timeout
+        # If no more direct children, reset adapter to clear stuck RFCOMM state
+        if not self.links:
+            print("[SINK] No remaining connections — resetting Bluetooth adapter to fix reconnect issues")
+            try:
+                subprocess.run(["hciconfig", "hci0", "reset"], check=True)
+                print("[SINK] Adapter reset complete")
+            except subprocess.CalledProcessError as e:
+                print(f"[SINK] Failed to reset adapter: {e}")
+            except Exception as e:
+                print(f"[SINK] Unexpected error during reset: {e}")
 
     # ------------------------------------------------------------------
     # Inbox

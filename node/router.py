@@ -71,6 +71,7 @@ class NodeRouter:
     # ----------------------------------------------------------------------
     def start(self) -> None:
         self.bt.start(self.on_bt_data)
+        self.bt.set_link_loss_callback(self._on_link_loss)
         print(f"[NODE {self.my_nid}] Router started")
 
     def stop(self) -> None:
@@ -136,14 +137,16 @@ class NodeRouter:
 
         self.routing.learn(msg.header.src, link_id, hop_count=1)
 
+        # Dispatch based on service
         if msg.header.service == ServiceId.HEARTBEAT:
             self._handle_heartbeat(msg, link_id)
-        elif not self.sec.has_link_key(link_id):
-            print("[NODE] Dropping message before handshake")
-            return
-        elif not self.sec.check_seq(link_id, msg.header.service, msg.header.client_id, msg.header.seq):
-            print("[NODE] Replay detected")
-            return
+        elif msg.header.service == ServiceId.INBOX:
+            self._handle_inbox(msg, link_id)
+        elif msg.header.service == ServiceId.HANDSHAKE:
+            self._handle_handshake(msg, link_id)
+        else:
+            print(f"[NODE] Unknown service {msg.header.service}, forwarding")
+            self._forward(msg, link_id)
 
     # ----------------------------------------------------------------------
     # Heartbeat
@@ -171,6 +174,8 @@ class NodeRouter:
             self.hop_count = 1
             self.links[link_id].is_uplink = True
             print(f"[NODE {self.my_nid}] Uplink established on link {link_id}")
+            self.bt.set_name(f"MESH|{self.hop_count}")
+            print(f"[NODE] Updated name to MESH|{self.hop_count}")
 
         self._flood(msg, incoming_link=link_id)
 
@@ -182,27 +187,25 @@ class NodeRouter:
             text = msg.payload.decode(errors="ignore")
             self.inbox_messages.append((msg.header.src, text))
             print(f"[NODE {self.my_nid}] Inbox: {text}")
-            return
-
-        self._forward(msg, incoming_link)
+        else:
+            # Not for me → forward (in case of multi-hop later)
+            self._forward(msg, incoming_link)
 
     # ----------------------------------------------------------------------
     # Forwarding
     # ----------------------------------------------------------------------
     def _forward(self, msg: WireMessage, incoming_link: int) -> None:
         dst = msg.header.dst
-
         entry = self.routing.lookup(dst)
         if entry:
             out_link = entry.link
         elif dst == SINK_NID and self.uplink_link_id is not None:
             out_link = self.uplink_link_id
         else:
-            return
+            return  # No route
 
         if out_link == incoming_link:
             return
-
         self._send_on_link(out_link, msg)
         self.routed_count += 1
 
@@ -310,39 +313,75 @@ class NodeRouter:
         self.last_heartbeat_ts = 0.0
         print("[NODE] Uplink down — routing reset")
 
+    def _on_link_loss(self, lost_link_id: int) -> None:
+        """
+        Called by BluetoothManager when a link is lost (socket closed, reset, etc.).
+        Handles cleanup: removes link state, drops keys, and if it was the uplink,
+        triggers full reset.
+        """
+        print(f"[NODE {self.my_nid}] Link loss detected on link {lost_link_id}")
+
+        # Drop the security key for this link
+        self.sec.drop_link_key(lost_link_id)
+
+        # Remove from links dict
+        link_state = self.links.pop(lost_link_id, None)
+        if link_state is None:
+            print(f"[NODE] Link {lost_link_id} was already removed")
+            return
+
+        # If this was our uplink, reset everything
+        if lost_link_id == self.uplink_link_id:
+            print(f"[NODE {self.my_nid}] Uplink lost on link {lost_link_id} — resetting routing")
+            self._on_uplink_down()  # Reuse existing reset logic
+        else:
+            print(f"[NODE {self.my_nid}] Downlink lost on link {lost_link_id}")
+            # Optionally: remove routes that went through this downlink
+            self.routing.remove_link(lost_link_id)
+
     # ----------------------------------------------------------------------
     # UI helper: connect to a chosen device
     # ----------------------------------------------------------------------
     def connect_to_device(self, dev: DeviceInfo) -> None:
-        if dev.hop_count < 0:
-            print(f"[NODE] Cannot connect to device with negative hop count ({dev.name})")
+        # Skip self
+        if dev.address.upper() == self.bt.local_mac.upper():
+            print(f"[NODE] Skipping self: {dev.address}")
             return
-        
-        if "MESH" not in dev.name and "|" not in dev.name:
-            print(f"[NODE] WARNING: '{dev.name}' may not be a mesh device")
 
+        print(f"[NODE] Attempting connection to {dev.address} ({dev.name}) hop={dev.hop_count}")
+
+        # If targeting sink (hop=0), only if no uplink
+        if dev.hop_count == 0 and self.uplink_link_id is not None:
+            print("[NODE] Already have uplink. Disconnect first.")
+            return
+
+        # Connect
         try:
             link_id = self.bt.connect_to(dev.address)
         except Exception as e:
             print(f"[NODE] Connection failed: {e}")
             return
 
-        hop = dev.hop_count if dev.hop_count >= 0 else 10
-
-        self.links[link_id] = LinkState(
-            is_uplink=(self.uplink_link_id is None),
-            peer_nid=None,
-            peer_hop_count=hop,
-        )
-
-        if self.uplink_link_id is None:
-            self.uplink_link_id = link_id
-            self.hop_count = hop + 1
-            print(f"[NODE] Using link {link_id} as uplink (hop={self.hop_count})")
-
+        # Set debug key immediately
         self.sec.set_link_key(link_id, DEBUG_LINK_KEY)
 
-        print(f"[NODE] Connected on link {link_id}")
+        # Determine role (uplink/downlink)
+        peer_hop = max(dev.hop_count, 0)  # Treat -1 as unknown
+        is_uplink = (self.uplink_link_id is None and peer_hop <= 1)  # Prefer low-hop as uplink
+
+        self.links[link_id] = LinkState(
+            is_uplink=is_uplink,
+            peer_nid=None,
+            peer_hop_count=peer_hop,
+        )
+
+        if is_uplink:
+            self.uplink_link_id = link_id
+            self.hop_count = peer_hop + 1
+            self.bt.set_name(f"MESH|{self.hop_count}")  # Update name immediately
+            print(f"[NODE] New UPLINK link {link_id} (hop={self.hop_count})")
+
+        print(f"[NODE] Connected on link {link_id} ({'uplink' if is_uplink else 'downlink'})")
 
     def pause_heartbeats_to(self, link_id: int) -> None:
         if link_id not in self.links:

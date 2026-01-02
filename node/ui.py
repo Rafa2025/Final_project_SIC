@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 from typing import NoReturn
+
+from common.message import MessageHeader, ServiceId, WireMessage
 from .router import LinkState, NodeRouter
 from common.nid import NID
 
@@ -30,7 +32,6 @@ class NodeUI:
         print(f"Routed messages: {self.router.routed_count}")
         print(f"Lost heartbeats: {self.router.lost_heartbeats}")
         print("===================\n")
-
     def _print_inbox(self) -> None:
         print("\n=== Inbox Messages ===")
         if not self.router.inbox_messages:
@@ -111,6 +112,37 @@ class NodeUI:
         else:
             self.router.pause_heartbeats_to(link_id)
 
+    def _send_to_any_node(self) -> None:
+        print("\n=== Send Message to Any Node ===")
+        nid_hex = input("Enter target NID (hex, e.g. c07d0e4e1fbb876e112cdb96e2fe63be): ").strip()
+        try:
+            target_nid = NID.from_hex(nid_hex)
+        except Exception:
+            print("Invalid NID format")
+            return
+
+        if target_nid == self.router.my_nid:
+            print("Cannot send to self")
+            return
+
+        text = input("Enter message text: ").strip()
+        if not text:
+            print("Empty message")
+            return
+
+        hdr = MessageHeader(
+            src=self.router.my_nid,
+            dst=target_nid,
+            service=ServiceId.INBOX,
+            client_id=1,
+            seq=self.router._next_seq_num(),
+        )
+        msg = WireMessage(header=hdr, payload=text.encode(), mac=b"")
+
+        # This uses _forward which looks up route (uplink or downlink)
+        self.router._forward(msg, incoming_link=None)
+        print(f"[UI] Message sent to {target_nid}")
+
     def run(self) -> NoReturn:
         while True:
             print("Node Menu:")
@@ -120,6 +152,8 @@ class NodeUI:
             print(" 4) Show Inbox messages")
             print(" 5) List direct downlinks")
             print(" 6) Pause/Resume heartbeats to a downlink (simulate break)")
+            print(" 7) Show routing table")
+            print(" 8) Send message to any node (by NID)")  # ← NEW
             print(" 0) Quit")
             choice = input("> ").strip()
 
@@ -138,6 +172,8 @@ class NodeUI:
                 self._toggle_heartbeat_pause()
             elif choice == "7":
                 self._print_routing_table()
+            elif choice == "8":  # ← NEW
+                self._send_to_any_node()
             elif choice == "0":
                 break
             else:

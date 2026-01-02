@@ -26,7 +26,7 @@ def load_sink_certs() -> SecurityContext:
 def main() -> None:
     sink_nid = NID(bytes(16))  # reserved ID for sink
 
-    bt = BluetoothManager(enable_server=True, adapter="hci0")
+    bt = BluetoothManager(enable_server=True, adapter="hci0", is_sink=True)
     sec = load_sink_certs()
     inbox = InboxService()
 

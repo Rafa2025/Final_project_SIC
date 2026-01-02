@@ -15,6 +15,6 @@ class InboxService:
         )
 
     def on_message_from_node(self, src: NID, client_id: int, payload: bytes) -> None:
+        self.messages.append((src, client_id, payload))  # store bytes
         text = payload.decode(errors="ignore")
-        self.messages.append((src, client_id, text))
         print(f"[SINK] Inbox from {src} (client {client_id}): {text}")

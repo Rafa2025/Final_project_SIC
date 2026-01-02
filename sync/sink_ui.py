@@ -40,8 +40,8 @@ class SinkUI:
             print("(empty)")
         else:
             for i, (src, client_id, payload) in enumerate(self.router.inbox.messages, start=1):
-                text = payload.decode(errors="ignore")
-                print(f"{i}. from {src} (client {client_id}): {text}")
+                # payload is already a decoded string
+                print(f"{i}. from {src} (client {client_id}): {payload}")
         print("===========================\n")
 
     def _disconnect_child(self) -> None:
